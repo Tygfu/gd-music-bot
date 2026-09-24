@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 GD Music Helper — Telegram bot
-Single-file version: локалізація, анкета, Newgrounds, донати.
+Single-file version: локалізація, анкета, Newgrounds (HTML parsing), донати.
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import re
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -27,6 +28,7 @@ from aiogram.types import (
     PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # =========================================================
@@ -536,14 +538,14 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 # user_id -> мовний код
-user_lang: dict[int, str] = {}
+user_lang: dict = {}
 
 
 def get_lang(user_id: int) -> str:
     return user_lang.get(user_id, "en")
 
 
-def detect_lang_from_telegram(language_code: str | None) -> str:
+def detect_lang_from_telegram(language_code) -> str:
     """Auto-detect bot language from Telegram language_code."""
     if not language_code:
         return "en"
@@ -565,7 +567,7 @@ def main_menu(lang: str) -> ReplyKeyboardMarkup:
     )
 
 
-def _inline_from_options(lang: str, prefix: str, keys: list[str]) -> InlineKeyboardMarkup:
+def _inline_from_options(lang: str, prefix: str, keys) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=t(lang, k), callback_data=f"{prefix}:{k}")] for k in keys]
     rows.append([InlineKeyboardButton(text=t(lang, "btn_cancel"), callback_data="cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -600,15 +602,105 @@ def results_kb(lang: str, tracks: list) -> InlineKeyboardMarkup:
 
 
 # =========================================================
-# NEWGROUNDS (заглушка — заміниш на реальні запити)
+# NEWGROUNDS HTML PARSING
 # =========================================================
+NG_SEARCH_URL = "https://www.newgrounds.com/audio/search"
+
+NG_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+GENRE_MAP = {
+    "genre_opt_1": "electronic",
+    "genre_opt_2": "dubstep",
+    "genre_opt_3": "drum and bass",
+    "genre_opt_4": "house",
+    "genre_opt_5": "rock",
+    "genre_opt_6": "orchestral",
+    "genre_opt_7": "chiptune",
+    "genre_opt_8": "",
+}
+
+MOOD_MAP = {
+    "mood_opt_1": "energetic",
+    "mood_opt_2": "dark",
+    "mood_opt_3": "happy",
+    "mood_opt_4": "sad",
+    "mood_opt_5": "ambient",
+}
+
+
 async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: str, limit: int = 8) -> list:
-    """
-    TODO: замінити на реальний запит до Newgrounds.io,
-    коли отримаєш App ID + Encryption Key.
-    Поки що повертає тестові дані.
-    """
-    await asyncio.sleep(0.5)
+    """Пошук треків на Newgrounds через HTML-парсинг."""
+    query_parts = []
+    if genre in GENRE_MAP and GENRE_MAP[genre]:
+        query_parts.append(GENRE_MAP[genre])
+    if mood in MOOD_MAP:
+        query_parts.append(MOOD_MAP[mood])
+
+    query = " ".join(query_parts) if query_parts else "electronic"
+
+    params = {
+        "q": query,
+        "kind": "all",
+        "sort": "relevance",
+    }
+
+    try:
+        async with aiohttp.ClientSession(headers=NG_HEADERS) as session:
+            async with session.get(NG_SEARCH_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    log.warning(f"NG returned status {resp.status}")
+                    return _fallback_tracks(limit)
+                html = await resp.text()
+    except Exception as e:
+        log.error(f"NG request error: {e}")
+        return _fallback_tracks(limit)
+
+    tracks = _parse_ng_html(html, limit)
+    if not tracks:
+        log.warning("NG parsing returned no tracks, using fallback")
+        return _fallback_tracks(limit)
+    return tracks
+
+
+def _parse_ng_html(html: str, limit: int) -> list:
+    """Витягує треки з HTML-сторінки Newgrounds."""
+    soup = BeautifulSoup(html, "html.parser")
+    tracks = []
+    seen_ids = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"/audio/listen/(\d+)", href)
+        if not m:
+            continue
+        song_id = m.group(1)
+        if song_id in seen_ids:
+            continue
+
+        title = a.get_text(strip=True)
+        if not title or len(title) < 2:
+            continue
+
+        seen_ids.add(song_id)
+        tracks.append({
+            "title": title[:60],
+            "author": "Newgrounds",
+            "url": f"https://www.newgrounds.com/audio/listen/{song_id}",
+        })
+
+        if len(tracks) >= limit:
+            break
+
+    return tracks
+
+
+def _fallback_tracks(limit: int) -> list:
+    """Демо-треки, якщо парсинг не спрацював."""
     demo = [
         {"title": "Stereo Madness", "author": "ForeverBound", "url": "https://www.newgrounds.com/audio/listen/398089"},
         {"title": "Back on Track", "author": "DJVI", "url": "https://www.newgrounds.com/audio/listen/398090"},
@@ -648,7 +740,6 @@ async def cmd_lang(message: Message):
     await message.answer(t(lang, "choose_lang"), reply_markup=lang_kb())
 
 
-# --- Reply-кнопки (текст залежить від мови, тому перевіряємо по всіх локалях) ---
 SEARCH_TEXTS = {t(c, "btn_search") for c in LOCALES}
 LANG_TEXTS = {t(c, "btn_lang") for c in LOCALES}
 DONATE_TEXTS = {t(c, "btn_donate") for c in LOCALES}
@@ -679,7 +770,6 @@ async def open_help(message: Message):
     await message.answer(t(get_lang(message.from_user.id), "help_text"))
 
 
-# --- Callback: мова ---
 @dp.callback_query(F.data.startswith("lang:"))
 async def set_lang(cb: CallbackQuery, state: FSMContext):
     code = cb.data.split(":")[1]
@@ -689,7 +779,6 @@ async def set_lang(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-# --- Callback: скасування ---
 @dp.callback_query(F.data == "cancel")
 async def cancel(cb: CallbackQuery, state: FSMContext):
     lang = get_lang(cb.from_user.id)
@@ -702,7 +791,6 @@ async def cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-# --- Callback: рестарт ---
 @dp.callback_query(F.data == "restart")
 async def restart(cb: CallbackQuery, state: FSMContext):
     lang = get_lang(cb.from_user.id)
@@ -711,7 +799,6 @@ async def restart(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-# --- Анкета ---
 @dp.callback_query(SearchForm.length, F.data.startswith("len:"))
 async def pick_length(cb: CallbackQuery, state: FSMContext):
     await state.update_data(length=cb.data.split(":")[1])
@@ -780,7 +867,6 @@ async def pick_vocals(cb: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# --- Донати (Telegram Stars) ---
 @dp.callback_query(F.data.startswith("donate:"))
 async def donate_cb(cb: CallbackQuery):
     amount = int(cb.data.split(":")[1])
@@ -806,7 +892,6 @@ async def on_paid(message: Message):
     await message.answer(t(get_lang(message.from_user.id), "donate_thanks"))
 
 
-# --- Fallback ---
 @dp.message()
 async def fallback(message: Message):
     lang = get_lang(message.from_user.id)
@@ -816,20 +901,14 @@ async def fallback(message: Message):
 # =========================================================
 # MAIN
 # =========================================================
-# =========================================================
-# MAIN
-# =========================================================
-import os as _os
-from aiohttp import web as _web
-
-
 async def _health(request):
-    return _web.Response(text="OK")
+    return aiohttp.web.Response(text="OK")
 
 
 async def _start_health_server():
     """Фіктивний HTTP-сервер, щоб Render бачив відкритий порт."""
-    port = int(_os.getenv("PORT", "10000"))
+    from aiohttp import web as _web
+    port = int(os.getenv("PORT", "10000"))
     app = _web.Application()
     app.router.add_get("/", _health)
     runner = _web.AppRunner(app)
@@ -841,7 +920,6 @@ async def _start_health_server():
 
 async def main():
     log.info("🚀 Бот запущено")
-    # Запускаємо health-сервер паралельно з ботом
     asyncio.create_task(_start_health_server())
     await dp.start_polling(bot)
 
