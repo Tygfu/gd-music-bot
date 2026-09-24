@@ -628,7 +628,7 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-        user_id = message.from_user.id
+    user_id = message.from_user.id
 
     if user_id not in user_lang:
         user_lang[user_id] = detect_lang_from_telegram(message.from_user.language_code)
@@ -816,8 +816,33 @@ async def fallback(message: Message):
 # =========================================================
 # MAIN
 # =========================================================
+# =========================================================
+# MAIN
+# =========================================================
+import os as _os
+from aiohttp import web as _web
+
+
+async def _health(request):
+    return _web.Response(text="OK")
+
+
+async def _start_health_server():
+    """Фіктивний HTTP-сервер, щоб Render бачив відкритий порт."""
+    port = int(_os.getenv("PORT", "10000"))
+    app = _web.Application()
+    app.router.add_get("/", _health)
+    runner = _web.AppRunner(app)
+    await runner.setup()
+    site = _web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"🌐 Health server on port {port}")
+
+
 async def main():
     log.info("🚀 Бот запущено")
+    # Запускаємо health-сервер паралельно з ботом
+    asyncio.create_task(_start_health_server())
     await dp.start_polling(bot)
 
 
