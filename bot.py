@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 GD Music Helper — Telegram bot
-Single-file version: локалізація, анкета, Newgrounds (HTML parsing), донати.
+Single-file version: локалізація, анкета, Newgrounds.io API, донати.
 """
 
 import asyncio
@@ -28,7 +28,6 @@ from aiogram.types import (
     PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # =========================================================
@@ -537,7 +536,6 @@ class SearchForm(StatesGroup):
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# user_id -> мовний код
 user_lang: dict = {}
 
 
@@ -602,16 +600,9 @@ def results_kb(lang: str, tracks: list) -> InlineKeyboardMarkup:
 
 
 # =========================================================
-# NEWGROUNDS HTML PARSING
+# NEWGROUNDS.IO API (v3) — RC4 + Base64
 # =========================================================
-NG_SEARCH_URL = "https://www.newgrounds.com/audio/search"
-
-NG_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+NG_API_URL = "https://www.newgrounds.io/gateway_v3.php"
 
 GENRE_MAP = {
     "genre_opt_1": "electronic",
@@ -633,8 +624,70 @@ MOOD_MAP = {
 }
 
 
+def _rc4_encrypt(plaintext: bytes, key_bytes: bytes) -> bytes:
+    """Реалізація шифру RC4."""
+    S = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + S[i] + key_bytes[i % len(key_bytes)]) % 256
+        S[i], S[j] = S[j], S[i]
+
+    i = j = 0
+    out = bytearray()
+    for byte in plaintext:
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+        K = S[(S[i] + S[j]) % 256]
+        out.append(byte ^ K)
+    return bytes(out)
+
+
+def _encrypt_call(call_obj: dict) -> str:
+    """Шифрує об'єкт виклику (JSON) + Base64."""
+    plaintext = json.dumps(call_obj, separators=(",", ":")).encode("utf-8")
+    key_bytes = NG_ENCRYPTION_KEY.encode("utf-8")
+    encrypted = _rc4_encrypt(plaintext, key_bytes)
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+async def _ng_call(component: str, method: str, parameters: dict) -> dict:
+    """Робить запит до Newgrounds.io API."""
+    if not NG_APP_ID or not NG_ENCRYPTION_KEY:
+        log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
+        return {}
+
+    call_obj = {
+        "component": component,
+        "method": method,
+        "parameters": parameters,
+    }
+    encrypted_data = _encrypt_call(call_obj)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                NG_API_URL,
+                data={"data": encrypted_data},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                raw = await resp.text()
+                log.info(f"NG RAW RESPONSE: {raw[:500]}")
+                if resp.status != 200:
+                    log.warning(f"NG returned status {resp.status}")
+                    return {}
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    log.error("NG response is not JSON")
+                    return {}
+    except Exception as e:
+        log.error(f"NG request error: {e}")
+        return {}
+
+
 async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: str, limit: int = 8) -> list:
-    """Пошук треків на Newgrounds через HTML-парсинг."""
+    """Реальний пошук треків через Newgrounds.io API."""
     query_parts = []
     if genre in GENRE_MAP and GENRE_MAP[genre]:
         query_parts.append(GENRE_MAP[genre])
@@ -643,64 +696,33 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 
     query = " ".join(query_parts) if query_parts else "electronic"
 
-    params = {
+    data = await _ng_call("Audio", "search", {
         "q": query,
-        "kind": "all",
-        "sort": "relevance",
-    }
+        "limit": limit,
+    })
 
-    try:
-        async with aiohttp.ClientSession(headers=NG_HEADERS) as session:
-            async with session.get(NG_SEARCH_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    log.warning(f"NG returned status {resp.status}")
-                    return _fallback_tracks(limit)
-                html = await resp.text()
-    except Exception as e:
-        log.error(f"NG request error: {e}")
-        return _fallback_tracks(limit)
-
-    tracks = _parse_ng_html(html, limit)
-    if not tracks:
-        log.warning("NG parsing returned no tracks, using fallback")
-        return _fallback_tracks(limit)
-    return tracks
-
-
-def _parse_ng_html(html: str, limit: int) -> list:
-    """Витягує треки з HTML-сторінки Newgrounds."""
-    soup = BeautifulSoup(html, "html.parser")
     tracks = []
-    seen_ids = set()
+    result = data.get("result", {})
+    if result.get("success"):
+        songs = result.get("data", {}).get("songs", [])
+        for song in songs[:limit]:
+            song_id = song.get("id")
+            if not song_id:
+                continue
+            tracks.append({
+                "title": song.get("name", "Unknown")[:60],
+                "author": song.get("artist", "Unknown"),
+                "url": f"https://www.newgrounds.com/audio/listen/{song_id}",
+            })
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        m = re.search(r"/audio/listen/(\d+)", href)
-        if not m:
-            continue
-        song_id = m.group(1)
-        if song_id in seen_ids:
-            continue
-
-        title = a.get_text(strip=True)
-        if not title or len(title) < 2:
-            continue
-
-        seen_ids.add(song_id)
-        tracks.append({
-            "title": title[:60],
-            "author": "Newgrounds",
-            "url": f"https://www.newgrounds.com/audio/listen/{song_id}",
-        })
-
-        if len(tracks) >= limit:
-            break
-
+    if not tracks:
+        log.warning("No tracks found via NG API, using fallback")
+        return _fallback_tracks(limit)
     return tracks
 
 
 def _fallback_tracks(limit: int) -> list:
-    """Демо-треки, якщо парсинг не спрацював."""
+    """Демо-треки, якщо API не спрацював."""
     demo = [
         {"title": "Stereo Madness", "author": "ForeverBound", "url": "https://www.newgrounds.com/audio/listen/398089"},
         {"title": "Back on Track", "author": "DJVI", "url": "https://www.newgrounds.com/audio/listen/398090"},
@@ -902,7 +924,8 @@ async def fallback(message: Message):
 # MAIN
 # =========================================================
 async def _health(request):
-    return aiohttp.web.Response(text="OK")
+    from aiohttp import web as _web
+    return _web.Response(text="OK")
 
 
 async def _start_health_server():
