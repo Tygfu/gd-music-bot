@@ -543,6 +543,14 @@ def get_lang(user_id: int) -> str:
     return user_lang.get(user_id, "en")
 
 
+def detect_lang_from_telegram(language_code: str | None) -> str:
+    """Auto-detect bot language from Telegram language_code."""
+    if not language_code:
+        return "en"
+    code = language_code.lower().split("-")[0]
+    return code if code in LOCALES else "en"
+
+
 # =========================================================
 # KEYBOARDS
 # =========================================================
@@ -620,13 +628,12 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    # Автовизначення мови з Telegram
-    lang = get_lang(message.from_user.id)
-    if message.from_user.language_code:
-        code = message.from_user.language_code.lower()[:2]
-        if code in LOCALES and message.from_user.id not in user_lang:
-            user_lang[message.from_user.id] = code
-            lang = code
+        user_id = message.from_user.id
+
+    if user_id not in user_lang:
+        user_lang[user_id] = detect_lang_from_telegram(message.from_user.language_code)
+
+    lang = get_lang(user_id)
     await message.answer(t(lang, "welcome"), reply_markup=main_menu(lang))
 
 
