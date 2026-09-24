@@ -657,10 +657,13 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
         log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
         return {}
 
-    call_obj = {
-        "component": component,
-        "method": method,
-        "parameters": parameters,
+        call_obj = {
+        "app_id": NG_APP_ID,
+        "call": {
+            "component": component,
+            "method": method,
+            "parameters": parameters,
+        },
     }
     encrypted_data = _encrypt_call(call_obj)
 
@@ -696,11 +699,10 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 
     query = " ".join(query_parts) if query_parts else "electronic"
 
-    data = await _ng_call("Audio", "search", {
+        data = await _ng_call("Audio", "getList", {
         "q": query,
         "limit": limit,
     })
-
     tracks = []
     result = data.get("result", {})
     if result.get("success"):
