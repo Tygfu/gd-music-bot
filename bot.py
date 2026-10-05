@@ -625,7 +625,7 @@ MOOD_MAP = {
 
 
 async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: str, limit: int = 8) -> list:
-    """Пошук треків на Newgrounds через HTML-парсинг (curl_cffi)."""
+    """Пошук треків на Newgrounds через HTML-парсинг (curl_cffi із сесією)."""
     query_parts = []
     if genre in GENRE_MAP and GENRE_MAP[genre]:
         query_parts.append(GENRE_MAP[genre])
@@ -634,21 +634,21 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 
     query = " ".join(query_parts) if query_parts else "electronic"
 
-    params = {
-        "q": query,
-        "kind": "all",
-        "sort": "relevance",
-    }
+    params = {"q": query, "kind": "all", "sort": "relevance"}
 
     try:
-        # curl_cffi імітує TLS-фінгерпринт Chrome — часто обходить Cloudflare
-        response = await asyncio.to_thread(
-            curl_requests.get,
-            NG_SEARCH_URL,
-            params=params,
-            impersonate="chrome120",
-            timeout=20
-        )
+        # Використовуємо Session для імітації поведінки браузера
+        from curl_cffi import requests as curl_requests
+        with curl_requests.Session(impersonate="chrome120") as session:
+            # Перший запит — "прогрів"
+            await asyncio.to_thread(session.get, "https://www.newgrounds.com", timeout=15)
+            # Невелика пауза
+            await asyncio.sleep(1.5)
+            # Основний запит
+            response = await asyncio.to_thread(
+                session.get, NG_SEARCH_URL, params=params, timeout=20
+            )
+        
         if response.status_code != 200:
             log.warning(f"NG returned status {response.status_code}")
             return _fallback_tracks(limit)
@@ -662,13 +662,6 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
         log.warning("NG parsing returned no tracks, using fallback")
         return _fallback_tracks(limit)
     return tracks
-
-    tracks = _parse_ng_html(html, limit)
-    if not tracks:
-        log.warning("NG parsing returned no tracks, using fallback")
-        return _fallback_tracks(limit)
-    return tracks
-
 
 def _parse_ng_html(html: str, limit: int) -> list:
     """Витягує треки з HTML-сторінки Newgrounds."""
