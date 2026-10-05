@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 GD Music Helper — Telegram bot
-Single-file version: локалізація, анкета, Newgrounds.io API, донати.
+Single-file version: локалізація, анкета, Newgrounds (HTML parsing), донати.
 """
 
 import asyncio
-import base64
-import json
 import logging
 import os
 import re
 
 import aiohttp
+import cloudscraper
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -28,6 +27,7 @@ from aiogram.types import (
     PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # =========================================================
@@ -600,9 +600,9 @@ def results_kb(lang: str, tracks: list) -> InlineKeyboardMarkup:
 
 
 # =========================================================
-# NEWGROUNDS.IO API (v3) — RC4 + Base64
+# NEWGROUNDS HTML PARSING (cloudscraper)
 # =========================================================
-NG_API_URL = "https://www.newgrounds.io/gateway_v3.php"
+NG_SEARCH_URL = "https://www.newgrounds.com/audio/search"
 
 GENRE_MAP = {
     "genre_opt_1": "electronic",
@@ -624,82 +624,8 @@ MOOD_MAP = {
 }
 
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-
-
-def _encrypt_call(call_obj: dict) -> str:
-    """Шифрує об'єкт виклику (JSON) + Base64 з використанням AES-128."""
-    # 1. JSON-рядок
-    plaintext = json.dumps(call_obj, separators=(",", ":")).encode("utf-8")
-
-    # 2. Декодуємо ключ з Base64 (AES-128 — 16 байт)
-    key_bytes = base64.b64decode(NG_ENCRYPTION_KEY)
-
-    # 3. Випадковий IV (16 байт)
-    iv = os.urandom(16)
-
-    # 4. AES-128-CBC
-    cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-
-    # 5. PKCS7 padding
-    pad_len = 16 - (len(plaintext) % 16)
-    padded = plaintext + bytes([pad_len] * pad_len)
-
-    ciphertext = encryptor.update(padded) + encryptor.finalize()
-
-    # 6. IV + ciphertext → Base64
-    return base64.b64encode(iv + ciphertext).decode("ascii")
-
-
-async def _ng_call(component: str, method: str, parameters: dict) -> dict:
-    """Робить запит до Newgrounds.io API."""
-    if not NG_APP_ID or not NG_ENCRYPTION_KEY:
-        log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
-        return {}
-
-    execute_obj = {
-        "component": component,
-        "method": method,
-        "parameters": parameters,
-    }
-
-    encrypted_execute = _encrypt_call(execute_obj)
-
-    request_obj = {
-        "app_id": NG_APP_ID,
-        "execute": {
-            "secure": encrypted_execute
-        }
-    }
-
-    request_json = json.dumps(request_obj, separators=(",", ":"))
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                NG_API_URL,
-                data={"request": request_json},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                raw = await resp.text()
-                log.info(f"NG RAW RESPONSE: {raw[:500]}")
-                if resp.status != 200:
-                    log.warning(f"NG returned status {resp.status}")
-                    return {}
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    log.error("NG response is not JSON")
-                    return {}
-    except Exception as e:
-        log.error(f"NG request error: {e}")
-        return {}
-
-
 async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: str, limit: int = 8) -> list:
-    """Реальний пошук треків через Newgrounds.io API."""
+    """Пошук треків на Newgrounds через HTML-парсинг (cloudscraper)."""
     query_parts = []
     if genre in GENRE_MAP and GENRE_MAP[genre]:
         query_parts.append(GENRE_MAP[genre])
@@ -708,32 +634,65 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 
     query = " ".join(query_parts) if query_parts else "electronic"
 
-    data = await _ng_call("Audio", "getList", {
+    params = {
         "q": query,
-        "limit": limit,
-    })
-    tracks = []
-    result = data.get("result", {})
-    if result.get("success"):
-        songs = result.get("data", {}).get("songs", [])
-        for song in songs[:limit]:
-            song_id = song.get("id")
-            if not song_id:
-                continue
-            tracks.append({
-                "title": song.get("name", "Unknown")[:60],
-                "author": song.get("artist", "Unknown"),
-                "url": f"https://www.newgrounds.com/audio/listen/{song_id}",
-            })
+        "kind": "all",
+        "sort": "relevance",
+    }
 
+    try:
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "desktop": True}
+        )
+        response = await asyncio.to_thread(
+            scraper.get, NG_SEARCH_URL, params=params, timeout=20
+        )
+        if response.status_code != 200:
+            log.warning(f"NG returned status {response.status_code}")
+            return _fallback_tracks(limit)
+        html = response.text
+    except Exception as e:
+        log.error(f"NG request error: {e}")
+        return _fallback_tracks(limit)
+
+    tracks = _parse_ng_html(html, limit)
     if not tracks:
-        log.warning("No tracks found via NG API, using fallback")
+        log.warning("NG parsing returned no tracks, using fallback")
         return _fallback_tracks(limit)
     return tracks
 
 
+def _parse_ng_html(html: str, limit: int) -> list:
+    """Витягує треки з HTML-сторінки Newgrounds."""
+    soup = BeautifulSoup(html, "html.parser")
+    tracks = []
+    seen_ids = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"/audio/listen/(\d+)", href)
+        if not m:
+            continue
+        song_id = m.group(1)
+        if song_id in seen_ids:
+            continue
+        title = a.get_text(strip=True)
+        if not title or len(title) < 2:
+            continue
+        seen_ids.add(song_id)
+        tracks.append({
+            "title": title[:60],
+            "author": "Newgrounds",
+            "url": f"https://www.newgrounds.com/audio/listen/{song_id}",
+        })
+        if len(tracks) >= limit:
+            break
+
+    return tracks
+
+
 def _fallback_tracks(limit: int) -> list:
-    """Демо-треки, якщо API не спрацював."""
+    """Демо-треки, якщо парсинг не спрацював."""
     demo = [
         {"title": "Stereo Madness", "author": "ForeverBound", "url": "https://www.newgrounds.com/audio/listen/398089"},
         {"title": "Back on Track", "author": "DJVI", "url": "https://www.newgrounds.com/audio/listen/398090"},
@@ -754,10 +713,8 @@ def _fallback_tracks(limit: int) -> list:
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-
     if user_id not in user_lang:
         user_lang[user_id] = detect_lang_from_telegram(message.from_user.language_code)
-
     lang = get_lang(user_id)
     await message.answer(t(lang, "welcome"), reply_markup=main_menu(lang))
 
@@ -940,7 +897,6 @@ async def _health(request):
 
 
 async def _start_health_server():
-    """Фіктивний HTTP-сервер, щоб Render бачив відкритий порт."""
     from aiohttp import web as _web
     port = int(os.getenv("PORT", "10000"))
     app = _web.Application()
