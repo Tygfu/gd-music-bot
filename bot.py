@@ -624,32 +624,33 @@ MOOD_MAP = {
 }
 
 
-def _rc4_encrypt(plaintext: bytes, key_bytes: bytes) -> bytes:
-    """Реалізація шифру RC4."""
-    S = list(range(256))
-    j = 0
-    for i in range(256):
-        j = (j + S[i] + key_bytes[i % len(key_bytes)]) % 256
-        S[i], S[j] = S[j], S[i]
-
-    i = j = 0
-    out = bytearray()
-    for byte in plaintext:
-        i = (i + 1) % 256
-        j = (j + S[i]) % 256
-        S[i], S[j] = S[j], S[i]
-        K = S[(S[i] + S[j]) % 256]
-        out.append(byte ^ K)
-    return bytes(out)
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 
 
 def _encrypt_call(call_obj: dict) -> str:
-    """Шифрує об'єкт виклику (JSON) + Base64."""
+    """Шифрує об'єкт виклику (JSON) + Base64 з використанням AES-128."""
+    # 1. JSON-рядок
     plaintext = json.dumps(call_obj, separators=(",", ":")).encode("utf-8")
-    # Ключ передається у Base64 — декодуємо його
+
+    # 2. Декодуємо ключ з Base64 (AES-128 — 16 байт)
     key_bytes = base64.b64decode(NG_ENCRYPTION_KEY)
-    encrypted = _rc4_encrypt(plaintext, key_bytes)
-    return base64.b64encode(encrypted).decode("ascii")
+
+    # 3. Випадковий IV (16 байт)
+    iv = os.urandom(16)
+
+    # 4. AES-128-CBC
+    cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+
+    # 5. PKCS7 padding
+    pad_len = 16 - (len(plaintext) % 16)
+    padded = plaintext + bytes([pad_len] * pad_len)
+
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+
+    # 6. IV + ciphertext → Base64
+    return base64.b64encode(iv + ciphertext).decode("ascii")
 
 
 async def _ng_call(component: str, method: str, parameters: dict) -> dict:
