@@ -657,18 +657,15 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
         log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
         return {}
 
-    # Формуємо об'єкт execute (те, що потрібно зашифрувати)
     execute_obj = {
         "component": component,
         "method": method,
         "parameters": parameters,
     }
 
-    # Шифруємо execute об'єкт
     encrypted_execute = _encrypt_call(execute_obj)
 
-    # Формуємо повний об'єкт запиту
-        request_obj = {
+    request_obj = {
         "app_id": NG_APP_ID,
         "execute": {
             "secure": encrypted_execute
@@ -676,7 +673,6 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
     }
 
     request_json = json.dumps(request_obj, separators=(",", ":"))
-    log.info(f"NG REQUEST SENT: {request_json[:200]}")
 
     try:
         async with aiohttp.ClientSession() as session:
