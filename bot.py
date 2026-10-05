@@ -657,7 +657,7 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
         log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
         return {}
 
-    # Формуємо об'єкт execute (те, що потрібно зашифрувати)
+    # Формуємо execute об'єкт (те, що потрібно зашифрувати)
     execute_obj = {
         "component": component,
         "method": method,
