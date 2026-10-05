@@ -646,7 +646,8 @@ def _rc4_encrypt(plaintext: bytes, key_bytes: bytes) -> bytes:
 def _encrypt_call(call_obj: dict) -> str:
     """Шифрує об'єкт виклику (JSON) + Base64."""
     plaintext = json.dumps(call_obj, separators=(",", ":")).encode("utf-8")
-    key_bytes = NG_ENCRYPTION_KEY.encode("utf-8")
+    # Ключ передається у Base64 — декодуємо його
+    key_bytes = base64.b64decode(NG_ENCRYPTION_KEY)
     encrypted = _rc4_encrypt(plaintext, key_bytes)
     return base64.b64encode(encrypted).decode("ascii")
 
