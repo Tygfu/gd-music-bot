@@ -10,7 +10,7 @@ import os
 import re
 
 import aiohttp
-import cloudscraper
+from curl_cffi import requests as curl_requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -625,7 +625,7 @@ MOOD_MAP = {
 
 
 async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: str, limit: int = 8) -> list:
-    """Пошук треків на Newgrounds через HTML-парсинг (cloudscraper)."""
+    """Пошук треків на Newgrounds через HTML-парсинг (curl_cffi)."""
     query_parts = []
     if genre in GENRE_MAP and GENRE_MAP[genre]:
         query_parts.append(GENRE_MAP[genre])
@@ -641,11 +641,13 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
     }
 
     try:
-        scraper = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "desktop": True}
-        )
+        # curl_cffi імітує TLS-фінгерпринт Chrome — часто обходить Cloudflare
         response = await asyncio.to_thread(
-            scraper.get, NG_SEARCH_URL, params=params, timeout=20
+            curl_requests.get,
+            NG_SEARCH_URL,
+            params=params,
+            impersonate="chrome120",
+            timeout=20
         )
         if response.status_code != 200:
             log.warning(f"NG returned status {response.status_code}")
@@ -654,6 +656,12 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
     except Exception as e:
         log.error(f"NG request error: {e}")
         return _fallback_tracks(limit)
+
+    tracks = _parse_ng_html(html, limit)
+    if not tracks:
+        log.warning("NG parsing returned no tracks, using fallback")
+        return _fallback_tracks(limit)
+    return tracks
 
     tracks = _parse_ng_html(html, limit)
     if not tracks:
@@ -709,11 +717,16 @@ def _fallback_tracks(limit: int) -> list:
 # =========================================================
 # HANDLERS
 # =========================================================
+# Множина user_id, які ОБРАЛИ мову вручну — для них не перезаписуємо
+manual_lang_users: set = set()
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-    if user_id not in user_lang:
+    # Якщо користувач НЕ обрав мову вручну — беремо з Telegram
+    if user_id not in manual_lang_users:
         user_lang[user_id] = detect_lang_from_telegram(message.from_user.language_code)
     lang = get_lang(user_id)
     await message.answer(t(lang, "welcome"), reply_markup=main_menu(lang))
@@ -765,6 +778,7 @@ async def set_lang(cb: CallbackQuery, state: FSMContext):
     code = cb.data.split(":")[1]
     if code in LOCALES:
         user_lang[cb.from_user.id] = code
+        manual_lang_users.add(cb.from_user.id)  # ← ДОДАЙ ЦЕЙ РЯДОК
         await cb.message.answer(t(code, "lang_changed"), reply_markup=main_menu(code))
     await cb.answer()
 
