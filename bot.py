@@ -657,24 +657,19 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
         log.warning("NG_APP_ID or NG_ENCRYPTION_KEY not set")
         return {}
 
-        call_obj = {
-        "app_id": NG_APP_ID,
-        "call": {
-            "component": component,
-            "method": method,
-            "parameters": parameters,
-        },
+            call_obj = {
+        "component": component,
+        "method": method,
+        "parameters": parameters,
     }
     encrypted_data = _encrypt_call(call_obj)
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                NG_API_URL,
-                data={"data": encrypted_data},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                raw = await resp.text()
+                data={
+                    "app_id": NG_APP_ID,
+                    "data": encrypted_data,
+                },sp.text()
                 log.info(f"NG RAW RESPONSE: {raw[:500]}")
                 if resp.status != 200:
                     log.warning(f"NG returned status {resp.status}")
@@ -699,7 +694,7 @@ async def search_tracks(length: str, genre: str, mood: str, bpm: str, vocals: st
 
     query = " ".join(query_parts) if query_parts else "electronic"
 
-        data = await _ng_call("Audio", "getList", {
+    data = await _ng_call("Audio", "getList", {
         "q": query,
         "limit": limit,
     })
