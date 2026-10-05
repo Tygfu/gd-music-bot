@@ -668,19 +668,18 @@ async def _ng_call(component: str, method: str, parameters: dict) -> dict:
     encrypted_execute = _encrypt_call(execute_obj)
 
     # Формуємо повний об'єкт запиту
-    request_obj = {
+        request_obj = {
         "app_id": NG_APP_ID,
         "execute": {
             "secure": encrypted_execute
         }
     }
 
-    # Серіалізуємо весь об'єкт запиту в JSON-рядок
     request_json = json.dumps(request_obj, separators=(",", ":"))
+    log.info(f"NG REQUEST SENT: {request_json[:200]}")
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Надсилаємо POST-запит з полем 'request'
             async with session.post(
                 NG_API_URL,
                 data={"request": request_json},
